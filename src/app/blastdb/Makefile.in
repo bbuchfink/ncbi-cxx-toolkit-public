@@ -5,7 +5,7 @@
 
 REQUIRES = objects algo
 
-APP_PROJ = blastdbcmd makeblastdb blastdb_aliastool blastdbcheck convert2blastmask blastdbcp makeprofiledb blastdb_convert blastdb_path makeclusterdb
+APP_PROJ = blastdbcmd makeblastdb blastdb_aliastool blastdbcheck convert2blastmask blastdbcp makeprofiledb blastdb_convert blastdb_path makeclusterdb psq_reader
 
 srcdir = @srcdir@
 include @builddir@/Makefile.meta
@@ -41,3 +41,6 @@ blastdb_path:
 	
 makeclusterdb:
 	${MAKE} ${MFLAGS} -f Makefile.makeclusterdb_app
+
+psq_reader:
+	${MAKE} ${MFLAGS} -f Makefile.psq_reader_app
