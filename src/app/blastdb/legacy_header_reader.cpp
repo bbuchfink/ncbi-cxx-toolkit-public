@@ -309,14 +309,144 @@ std::vector<std::string> ExtractHeaders(const PinIndex &index, const std::filesy
     return headers;
 }
 
+bool IsVisibleLikeTag(const BerTag &tag)
+{
+    // Blast titles are encoded as VisibleString in most databases, but older
+    // volumes sometimes use different string types. Accept all universal
+    // string encodings so we decode the title even when the concrete tag
+    // varies (e.g., PrintableString instead of VisibleString).
+    if (tag.cls != BerClass::Universal) {
+        return false;
+    }
+
+    switch (tag.number) {
+    case 4:  // OctetString (some legacy titles use this in place of VisibleString)
+    case 12: // UTF8String
+    case 18: // NumericString
+    case 19: // PrintableString
+    case 20: // TeletexString
+    case 21: // VideotexString
+    case 22: // IA5String
+    case 25: // GraphicString
+    case 26: // VisibleString
+    case 27: // GeneralString
+    case 28: // UniversalString
+    case 29: // CharacterString
+    case 30: // BMPString
+        return true;
+    default:
+        return false;
+    }
+}
+
+std::string ParseVisibleElement(const std::vector<Byte> &buffer,
+                                std::size_t &offset,
+                                const BerTag &tag,
+                                const BerLength &len)
+{
+    if (!IsVisibleLikeTag(tag)) {
+        throw PinParseError("Expected string type");
+    }
+
+    if (!tag.constructed) {
+        if (len.indefinite) {
+            throw PinParseError("Primitive string used with indefinite length");
+        }
+        return ParseString(buffer, offset, len.length);
+    }
+
+    const bool inner_indef = len.indefinite;
+    const std::size_t inner_end = inner_indef ? buffer.size() : offset + len.length;
+    std::string combined;
+
+    while (true) {
+        if (inner_indef && IsEoc(buffer, offset)) {
+            offset += 2;
+            break;
+        }
+        if (!inner_indef && offset >= inner_end) {
+            break;
+        }
+
+        const BerTag chunk_tag = ReadTag(buffer, offset);
+        const BerLength chunk_len = ReadLength(buffer, offset);
+        if (IsVisibleLikeTag(chunk_tag) && !chunk_tag.constructed && !chunk_len.indefinite) {
+            combined += ParseString(buffer, offset, chunk_len.length);
+        } else {
+            SkipElement(buffer, offset);
+        }
+    }
+
+    if (!inner_indef && offset < inner_end) {
+        offset = inner_end;
+    }
+
+    return combined;
+}
+
 std::string ParseVisible(const std::vector<Byte> &buffer, std::size_t &offset)
 {
     const BerTag inner_tag = ReadTag(buffer, offset);
     const BerLength inner_len = ReadLength(buffer, offset);
-    if (inner_tag.cls != BerClass::Universal || inner_tag.number != 26 || inner_len.indefinite) {
-        throw PinParseError("Expected VisibleString inside explicit tag");
+    return ParseVisibleElement(buffer, offset, inner_tag, inner_len);
+}
+
+std::optional<std::string> ExtractVisibleLike(const std::vector<Byte> &buffer,
+                                              std::size_t &offset, std::size_t limit)
+{
+    while (offset < limit) {
+        if (IsEoc(buffer, offset)) {
+            offset += 2;
+            break;
+        }
+
+        const std::size_t element_start = offset;
+        const BerTag tag = ReadTag(buffer, offset);
+        const BerLength len = ReadLength(buffer, offset);
+
+        if (IsVisibleLikeTag(tag)) {
+            if (tag.constructed) {
+                const bool indef = len.indefinite;
+                const std::size_t end = indef ? limit : offset + len.length;
+                if (auto inner = ExtractVisibleLike(buffer, offset, end)) {
+                    return inner;
+                }
+                if (!indef && offset < end) {
+                    offset = end;
+                }
+            } else if (len.indefinite) {
+                throw PinParseError("Primitive string used with indefinite length");
+            } else {
+                return ParseString(buffer, offset, len.length);
+            }
+        } else if (len.indefinite) {
+            if (!tag.constructed) {
+                throw PinParseError("Indefinite length used with primitive element");
+            }
+            while (true) {
+                if (IsEoc(buffer, offset)) {
+                    offset += 2;
+                    break;
+                }
+                if (auto inner = ExtractVisibleLike(buffer, offset, limit)) {
+                    return inner;
+                }
+            }
+        } else {
+            if (offset + len.length > buffer.size()) {
+                throw PinParseError("BER element exceeds buffer size");
+            }
+            offset += len.length;
+        }
+
+        if (offset <= element_start) {
+            // Safety: ensure forward progress to avoid infinite loops if the
+            // input is malformed.
+            throw PinParseError("Failed to advance while scanning for string element");
+        }
     }
-    return ParseString(buffer, offset, inner_len.length);
+
+    return std::nullopt;
 }
 
 std::string TagNameFromNumber(std::uint32_t num)
@@ -478,8 +608,8 @@ SeqId ParseSeqId(const std::vector<Byte> &buffer, std::size_t &offset)
 std::vector<SeqId> ParseSeqIdList(const std::vector<Byte> &buffer, std::size_t &offset)
 {
     const BerTag tag = ReadTag(buffer, offset);
-    if (tag.cls != BerClass::Universal || tag.number != 16 || !tag.constructed) {
-        throw PinParseError("Expected SEQUENCE for Seq-id list");
+    if (tag.cls != BerClass::Universal || !tag.constructed || (tag.number != 16 && tag.number != 17)) {
+        throw PinParseError("Expected SEQUENCE/SET for Seq-id list");
     }
 
     const BerLength len = ReadLength(buffer, offset);
@@ -500,9 +630,8 @@ std::vector<SeqId> ParseSeqIdList(const std::vector<Byte> &buffer, std::size_t &
     return ids;
 }
 
-std::vector<SeqId> ParseSeqIdField(const std::vector<Byte> &buffer, std::size_t &offset)
+std::vector<SeqId> ParseSeqIdField(const std::vector<Byte> &buffer, std::size_t &offset, const BerLength &len)
 {
-    const BerLength len = ReadLength(buffer, offset);
     const std::size_t start = offset;
 
     auto ids = ParseSeqIdList(buffer, offset);
@@ -550,24 +679,35 @@ std::int64_t ParseExplicitInteger(const std::vector<Byte> &buffer, std::size_t &
 std::string ParseExplicitVisible(const std::vector<Byte> &buffer, std::size_t &offset, const BerLength &len)
 {
     const std::size_t start = offset;
-    std::string result = ParseVisible(buffer, offset);
+    const std::size_t end = len.indefinite ? buffer.size() : start + len.length;
+    std::string result;
+
+    try {
+        result = ParseVisible(buffer, offset);
+    } catch (const PinParseError &) {
+        // Fall back to a more permissive scan in case the explicit wrapper
+        // contains additional layers or unexpected ordering before the
+        // string we need.
+        offset = start;
+        auto recovered = ExtractVisibleLike(buffer, offset, end);
+        result = recovered.value_or(std::string());
+    }
 
     if (len.indefinite) {
-        while (!IsEoc(buffer, offset)) {
+        while (offset < end && !IsEoc(buffer, offset)) {
             SkipElement(buffer, offset);
         }
-        offset += 2;
-    } else {
-        const std::size_t end = start + len.length;
-        if (offset < end) {
-            offset = end; // skip any trailing explicit content we did not decode
+        if (IsEoc(buffer, offset)) {
+            offset += 2;
         }
+    } else if (offset < end) {
+        offset = end; // skip any trailing explicit content we did not decode
     }
 
     return result;
 }
 
-std::vector<BlastDefLine> DecodeDeflineSet(const std::string &blob, std::string *error_out = nullptr)
+std::vector<BlastDefLine> DecodeDeflineSetBer(const std::string &blob, std::string *error_out)
 {
     const std::vector<Byte> buffer(blob.begin(), blob.end());
     std::size_t offset = 0;
@@ -615,34 +755,70 @@ std::vector<BlastDefLine> DecodeDeflineSet(const std::string &blob, std::string 
                         break;
                     }
 
+                    const std::size_t element_start = offset;
                     const BerTag field_tag = ReadTag(buffer, offset);
-                    if (field_tag.cls != BerClass::ContextSpecific) {
-                        SkipElement(buffer, offset);
-                        continue;
-                    }
+                    const BerLength field_len = ReadLength(buffer, offset);
 
-                    switch (field_tag.number) {
-                    case 0: { // title
-                        const BerLength len = ReadLength(buffer, offset);
-                        entry.title = ParseExplicitVisible(buffer, offset, len);
-                        break;
-                    }
-                    case 1: { // seqid list
-                        entry.seqids = ParseSeqIdField(buffer, offset);
-                        break;
-                    }
-                    case 2: { // taxid integer
-                        const BerLength len = ReadLength(buffer, offset);
-                        if (field_tag.constructed || len.indefinite) {
-                            entry.taxid = ParseExplicitInteger(buffer, offset, len);
-                        } else {
-                            entry.taxid = ParseInteger(buffer, offset, len.length);
+                    if (field_tag.cls == BerClass::ContextSpecific) {
+                        switch (field_tag.number) {
+                        case 0: // title
+                            if (entry.title.empty()) {
+                                if (field_tag.constructed || field_len.indefinite) {
+                                    entry.title = ParseExplicitVisible(buffer, offset, field_len);
+                                } else {
+                                    entry.title = ParseString(buffer, offset, field_len.length);
+                                }
+                            } else if (field_len.indefinite) {
+                                SkipElement(buffer, offset);
+                            } else {
+                                offset += field_len.length;
+                            }
+                            break;
+                        case 1: // seqids
+                            if (entry.seqids.empty()) {
+                                entry.seqids = ParseSeqIdField(buffer, offset, field_len);
+                            } else if (field_len.indefinite) {
+                                SkipElement(buffer, offset);
+                            } else {
+                                offset += field_len.length;
+                            }
+                            break;
+                        case 2: // taxid
+                            if (!entry.taxid) {
+                                if (field_tag.constructed || field_len.indefinite) {
+                                    entry.taxid = ParseExplicitInteger(buffer, offset, field_len);
+                                } else {
+                                    entry.taxid = ParseInteger(buffer, offset, field_len.length);
+                                }
+                            } else if (field_len.indefinite) {
+                                SkipElement(buffer, offset);
+                            } else {
+                                offset += field_len.length;
+                            }
+                            break;
+                        default:
+                            offset = element_start;
+                            SkipElement(buffer, offset);
+                            break;
                         }
-                        break;
-                    }
-                    default:
+                    } else if (field_tag.cls == BerClass::Universal) {
+                        if (IsVisibleLikeTag(field_tag) && entry.title.empty()) {
+                            entry.title = ParseVisibleElement(buffer, offset, field_tag, field_len);
+                        } else if (field_tag.number == 16 && entry.seqids.empty()) {
+                            entry.seqids = ParseSeqIdField(buffer, offset, field_len);
+                        } else if (field_tag.number == 2 && !entry.taxid) {
+                            if (field_tag.constructed || field_len.indefinite) {
+                                entry.taxid = ParseExplicitInteger(buffer, offset, field_len);
+                            } else {
+                                entry.taxid = ParseInteger(buffer, offset, field_len.length);
+                            }
+                        } else {
+                            offset = element_start;
+                            SkipElement(buffer, offset);
+                        }
+                    } else {
+                        offset = element_start;
                         SkipElement(buffer, offset);
-                        break;
                     }
                 }
 
@@ -664,6 +840,11 @@ std::vector<BlastDefLine> DecodeDeflineSet(const std::string &blob, std::string 
     }
 
     return deflines;
+}
+
+std::vector<BlastDefLine> DecodeDeflineSet(const std::string &blob, std::string *error_out = nullptr)
+{
+    return DecodeDeflineSetBer(blob, error_out);
 }
 
 void DumpHeaders(const std::vector<std::string> &headers, const std::filesystem::path &output_dir)
