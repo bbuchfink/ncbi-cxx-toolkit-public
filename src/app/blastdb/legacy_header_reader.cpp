@@ -309,14 +309,59 @@ std::vector<std::string> ExtractHeaders(const PinIndex &index, const std::filesy
     return headers;
 }
 
+bool IsVisibleLikeTag(const BerTag &tag)
+{
+    // Blast titles are encoded as VisibleString in most databases, but older
+    // volumes sometimes use different string types such as IA5String or
+    // UTF8String. Treat all of them as string-like so deflines decode
+    // consistently even when the concrete universal tag varies.
+    return tag.cls == BerClass::Universal &&
+           (tag.number == 26 /* VisibleString */ || tag.number == 22 /* IA5String */ ||
+            tag.number == 12 /* UTF8String */);
+}
+
 std::string ParseVisible(const std::vector<Byte> &buffer, std::size_t &offset)
 {
     const BerTag inner_tag = ReadTag(buffer, offset);
     const BerLength inner_len = ReadLength(buffer, offset);
-    if (inner_tag.cls != BerClass::Universal || inner_tag.number != 26 || inner_len.indefinite) {
-        throw PinParseError("Expected VisibleString inside explicit tag");
+    if (!IsVisibleLikeTag(inner_tag)) {
+        throw PinParseError("Expected string type inside explicit tag");
     }
-    return ParseString(buffer, offset, inner_len.length);
+
+    if (!inner_tag.constructed) {
+        if (inner_len.indefinite) {
+            throw PinParseError("Primitive string used with indefinite length");
+        }
+        return ParseString(buffer, offset, inner_len.length);
+    }
+
+    const bool inner_indef = inner_len.indefinite;
+    const std::size_t inner_end = inner_indef ? buffer.size() : offset + inner_len.length;
+    std::string combined;
+
+    while (true) {
+        if (inner_indef && IsEoc(buffer, offset)) {
+            offset += 2;
+            break;
+        }
+        if (!inner_indef && offset >= inner_end) {
+            break;
+        }
+
+        const BerTag chunk_tag = ReadTag(buffer, offset);
+        const BerLength chunk_len = ReadLength(buffer, offset);
+        if (IsVisibleLikeTag(chunk_tag) && !chunk_tag.constructed && !chunk_len.indefinite) {
+            combined += ParseString(buffer, offset, chunk_len.length);
+        } else {
+            SkipElement(buffer, offset);
+        }
+    }
+
+    if (!inner_indef && offset < inner_end) {
+        offset = inner_end;
+    }
+
+    return combined;
 }
 
 std::string TagNameFromNumber(std::uint32_t num)
@@ -624,7 +669,11 @@ std::vector<BlastDefLine> DecodeDeflineSet(const std::string &blob, std::string 
                     switch (field_tag.number) {
                     case 0: { // title
                         const BerLength len = ReadLength(buffer, offset);
-                        entry.title = ParseExplicitVisible(buffer, offset, len);
+                        if (field_tag.constructed || len.indefinite) {
+                            entry.title = ParseExplicitVisible(buffer, offset, len);
+                        } else {
+                            entry.title = ParseString(buffer, offset, len.length);
+                        }
                         break;
                     }
                     case 1: { // seqid list
