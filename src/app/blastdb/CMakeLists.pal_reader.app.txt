@@ -1,0 +1,6 @@
+# $Id$
+
+NCBI_begin_app(pal_reader)
+  NCBI_sources(pal_reader)
+  NCBI_add_definitions(NCBI_MODULE=BLASTDB)
+NCBI_end_app()
