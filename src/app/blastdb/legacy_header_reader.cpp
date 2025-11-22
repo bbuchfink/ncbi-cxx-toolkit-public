@@ -364,6 +364,64 @@ std::string ParseVisible(const std::vector<Byte> &buffer, std::size_t &offset)
     return combined;
 }
 
+std::optional<std::string> ExtractVisibleLike(const std::vector<Byte> &buffer,
+                                              std::size_t &offset, std::size_t limit)
+{
+    while (offset < limit) {
+        if (IsEoc(buffer, offset)) {
+            offset += 2;
+            break;
+        }
+
+        const std::size_t element_start = offset;
+        const BerTag tag = ReadTag(buffer, offset);
+        const BerLength len = ReadLength(buffer, offset);
+
+        if (IsVisibleLikeTag(tag)) {
+            if (tag.constructed) {
+                const bool indef = len.indefinite;
+                const std::size_t end = indef ? limit : offset + len.length;
+                if (auto inner = ExtractVisibleLike(buffer, offset, end)) {
+                    return inner;
+                }
+                if (!indef && offset < end) {
+                    offset = end;
+                }
+            } else if (len.indefinite) {
+                throw PinParseError("Primitive string used with indefinite length");
+            } else {
+                return ParseString(buffer, offset, len.length);
+            }
+        } else if (len.indefinite) {
+            if (!tag.constructed) {
+                throw PinParseError("Indefinite length used with primitive element");
+            }
+            while (true) {
+                if (IsEoc(buffer, offset)) {
+                    offset += 2;
+                    break;
+                }
+                if (auto inner = ExtractVisibleLike(buffer, offset, limit)) {
+                    return inner;
+                }
+            }
+        } else {
+            if (offset + len.length > buffer.size()) {
+                throw PinParseError("BER element exceeds buffer size");
+            }
+            offset += len.length;
+        }
+
+        if (offset <= element_start) {
+            // Safety: ensure forward progress to avoid infinite loops if the
+            // input is malformed.
+            throw PinParseError("Failed to advance while scanning for string element");
+        }
+    }
+
+    return std::nullopt;
+}
+
 std::string TagNameFromNumber(std::uint32_t num)
 {
     static const std::unordered_map<std::uint32_t, std::string> kNames = {
@@ -595,18 +653,29 @@ std::int64_t ParseExplicitInteger(const std::vector<Byte> &buffer, std::size_t &
 std::string ParseExplicitVisible(const std::vector<Byte> &buffer, std::size_t &offset, const BerLength &len)
 {
     const std::size_t start = offset;
-    std::string result = ParseVisible(buffer, offset);
+    const std::size_t end = len.indefinite ? buffer.size() : start + len.length;
+    std::string result;
+
+    try {
+        result = ParseVisible(buffer, offset);
+    } catch (const PinParseError &) {
+        // Fall back to a more permissive scan in case the explicit wrapper
+        // contains additional layers or unexpected ordering before the
+        // string we need.
+        offset = start;
+        auto recovered = ExtractVisibleLike(buffer, offset, end);
+        result = recovered.value_or(std::string());
+    }
 
     if (len.indefinite) {
-        while (!IsEoc(buffer, offset)) {
+        while (offset < end && !IsEoc(buffer, offset)) {
             SkipElement(buffer, offset);
         }
-        offset += 2;
-    } else {
-        const std::size_t end = start + len.length;
-        if (offset < end) {
-            offset = end; // skip any trailing explicit content we did not decode
+        if (IsEoc(buffer, offset)) {
+            offset += 2;
         }
+    } else if (offset < end) {
+        offset = end; // skip any trailing explicit content we did not decode
     }
 
     return result;
