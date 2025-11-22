@@ -320,6 +320,7 @@ bool IsVisibleLikeTag(const BerTag &tag)
     }
 
     switch (tag.number) {
+    case 4:  // OctetString (some legacy titles use this in place of VisibleString)
     case 12: // UTF8String
     case 18: // NumericString
     case 19: // PrintableString
