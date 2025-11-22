@@ -608,8 +608,8 @@ SeqId ParseSeqId(const std::vector<Byte> &buffer, std::size_t &offset)
 std::vector<SeqId> ParseSeqIdList(const std::vector<Byte> &buffer, std::size_t &offset)
 {
     const BerTag tag = ReadTag(buffer, offset);
-    if (tag.cls != BerClass::Universal || tag.number != 16 || !tag.constructed) {
-        throw PinParseError("Expected SEQUENCE for Seq-id list");
+    if (tag.cls != BerClass::Universal || !tag.constructed || (tag.number != 16 && tag.number != 17)) {
+        throw PinParseError("Expected SEQUENCE/SET for Seq-id list");
     }
 
     const BerLength len = ReadLength(buffer, offset);
@@ -759,21 +759,62 @@ std::vector<BlastDefLine> DecodeDeflineSetBer(const std::string &blob, std::stri
                     const BerTag field_tag = ReadTag(buffer, offset);
                     const BerLength field_len = ReadLength(buffer, offset);
 
-                    if (field_tag.cls != BerClass::Universal) {
-                        offset = element_start;
-                        SkipElement(buffer, offset);
-                        continue;
-                    }
-
-                    if (IsVisibleLikeTag(field_tag) && entry.title.empty()) {
-                        entry.title = ParseVisibleElement(buffer, offset, field_tag, field_len);
-                    } else if (field_tag.number == 16 && entry.seqids.empty()) {
-                        entry.seqids = ParseSeqIdField(buffer, offset, field_len);
-                    } else if (field_tag.number == 2 && !entry.taxid) {
-                        if (field_tag.constructed || field_len.indefinite) {
-                            entry.taxid = ParseExplicitInteger(buffer, offset, field_len);
+                    if (field_tag.cls == BerClass::ContextSpecific) {
+                        switch (field_tag.number) {
+                        case 0: // title
+                            if (entry.title.empty()) {
+                                if (field_tag.constructed || field_len.indefinite) {
+                                    entry.title = ParseExplicitVisible(buffer, offset, field_len);
+                                } else {
+                                    entry.title = ParseString(buffer, offset, field_len.length);
+                                }
+                            } else if (field_len.indefinite) {
+                                SkipElement(buffer, offset);
+                            } else {
+                                offset += field_len.length;
+                            }
+                            break;
+                        case 1: // seqids
+                            if (entry.seqids.empty()) {
+                                entry.seqids = ParseSeqIdField(buffer, offset, field_len);
+                            } else if (field_len.indefinite) {
+                                SkipElement(buffer, offset);
+                            } else {
+                                offset += field_len.length;
+                            }
+                            break;
+                        case 2: // taxid
+                            if (!entry.taxid) {
+                                if (field_tag.constructed || field_len.indefinite) {
+                                    entry.taxid = ParseExplicitInteger(buffer, offset, field_len);
+                                } else {
+                                    entry.taxid = ParseInteger(buffer, offset, field_len.length);
+                                }
+                            } else if (field_len.indefinite) {
+                                SkipElement(buffer, offset);
+                            } else {
+                                offset += field_len.length;
+                            }
+                            break;
+                        default:
+                            offset = element_start;
+                            SkipElement(buffer, offset);
+                            break;
+                        }
+                    } else if (field_tag.cls == BerClass::Universal) {
+                        if (IsVisibleLikeTag(field_tag) && entry.title.empty()) {
+                            entry.title = ParseVisibleElement(buffer, offset, field_tag, field_len);
+                        } else if (field_tag.number == 16 && entry.seqids.empty()) {
+                            entry.seqids = ParseSeqIdField(buffer, offset, field_len);
+                        } else if (field_tag.number == 2 && !entry.taxid) {
+                            if (field_tag.constructed || field_len.indefinite) {
+                                entry.taxid = ParseExplicitInteger(buffer, offset, field_len);
+                            } else {
+                                entry.taxid = ParseInteger(buffer, offset, field_len.length);
+                            }
                         } else {
-                            entry.taxid = ParseInteger(buffer, offset, field_len.length);
+                            offset = element_start;
+                            SkipElement(buffer, offset);
                         }
                     } else {
                         offset = element_start;
