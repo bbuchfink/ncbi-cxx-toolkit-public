@@ -312,12 +312,30 @@ std::vector<std::string> ExtractHeaders(const PinIndex &index, const std::filesy
 bool IsVisibleLikeTag(const BerTag &tag)
 {
     // Blast titles are encoded as VisibleString in most databases, but older
-    // volumes sometimes use different string types such as IA5String or
-    // UTF8String. Treat all of them as string-like so deflines decode
-    // consistently even when the concrete universal tag varies.
-    return tag.cls == BerClass::Universal &&
-           (tag.number == 26 /* VisibleString */ || tag.number == 22 /* IA5String */ ||
-            tag.number == 12 /* UTF8String */);
+    // volumes sometimes use different string types. Accept all universal
+    // string encodings so we decode the title even when the concrete tag
+    // varies (e.g., PrintableString instead of VisibleString).
+    if (tag.cls != BerClass::Universal) {
+        return false;
+    }
+
+    switch (tag.number) {
+    case 12: // UTF8String
+    case 18: // NumericString
+    case 19: // PrintableString
+    case 20: // TeletexString
+    case 21: // VideotexString
+    case 22: // IA5String
+    case 25: // GraphicString
+    case 26: // VisibleString
+    case 27: // GeneralString
+    case 28: // UniversalString
+    case 29: // CharacterString
+    case 30: // BMPString
+        return true;
+    default:
+        return false;
+    }
 }
 
 std::string ParseVisible(const std::vector<Byte> &buffer, std::size_t &offset)
