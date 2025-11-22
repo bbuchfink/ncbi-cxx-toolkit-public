@@ -624,7 +624,11 @@ std::vector<BlastDefLine> DecodeDeflineSet(const std::string &blob, std::string 
                     switch (field_tag.number) {
                     case 0: { // title
                         const BerLength len = ReadLength(buffer, offset);
-                        entry.title = ParseExplicitVisible(buffer, offset, len);
+                        if (field_tag.constructed || len.indefinite) {
+                            entry.title = ParseExplicitVisible(buffer, offset, len);
+                        } else {
+                            entry.title = ParseString(buffer, offset, len.length);
+                        }
                         break;
                     }
                     case 1: { // seqid list
