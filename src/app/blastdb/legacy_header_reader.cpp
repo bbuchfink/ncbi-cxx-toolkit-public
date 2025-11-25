@@ -530,6 +530,60 @@ SeqId ParseTextSeqId(const std::vector<Byte> &buffer, std::size_t &offset, std::
     return id;
 }
 
+SeqId ParsePdbSeqId(const std::vector<Byte> &buffer,
+                    std::size_t &offset,
+                    const BerLength &len)
+{
+    SeqId id;
+    const bool indefinite = len.indefinite;
+    const std::size_t end = indefinite ? buffer.size() : offset + len.length;
+
+    while (true) {
+        if (indefinite && IsEoc(buffer, offset)) {
+            offset += 2;
+            break;
+        }
+        if (!indefinite && offset >= end) {
+            break;
+        }
+
+        const std::size_t field_start = offset;
+        const BerTag field_tag = ReadTag(buffer, offset);
+        const BerLength field_len = ReadLength(buffer, offset);
+
+        if (field_tag.cls == BerClass::Universal && field_tag.number == 26 && id.value.empty()) {
+            if (field_tag.constructed || field_len.indefinite) {
+                id.value = ParseExplicitVisible(buffer, offset, field_len);
+            } else {
+                id.value = ParseString(buffer, offset, field_len.length);
+            }
+        } else if (field_tag.cls == BerClass::Universal && field_tag.number == 2 && !id.version) {
+            if (field_tag.constructed || field_len.indefinite) {
+                id.version = ParseExplicitInteger(buffer, offset, field_len);
+            } else {
+                id.version = ParseInteger(buffer, offset, field_len.length);
+            }
+        } else if (field_len.indefinite) {
+            SkipElement(buffer, offset);
+        } else {
+            if (offset + field_len.length > buffer.size()) {
+                throw PinParseError("BER element exceeds buffer size");
+            }
+            offset += field_len.length;
+        }
+
+        if (offset <= field_start) {
+            throw PinParseError("Failed to advance while parsing PDB-seq-id");
+        }
+    }
+
+    if (!indefinite && offset < end) {
+        offset = end;
+    }
+
+    return id;
+}
+
 SeqId ParseSeqId(const std::vector<Byte> &buffer, std::size_t &offset)
 {
     const std::size_t seqid_start = offset;
@@ -543,27 +597,8 @@ SeqId ParseSeqId(const std::vector<Byte> &buffer, std::size_t &offset)
 
     if (tag.constructed) {
         if (tag.number == 14) {
-            // PDB-seq-id ::= SEQUENCE { mol VisibleString, chain INTEGER DEFAULT 32, ... }
-            const BerLength len = ReadLength(buffer, offset);
-            const bool indefinite = len.indefinite;
-            const std::size_t end = indefinite ? buffer.size() : offset + len.length;
-            while (indefinite ? !IsEoc(buffer, offset) : offset < end) {
-                const BerTag field_tag = ReadTag(buffer, offset);
-                const BerLength field_len = ReadLength(buffer, offset);
-                if (field_len.indefinite) {
-                    throw PinParseError("Indefinite length inside PDB-seq-id");
-                }
-                if (field_tag.cls == BerClass::Universal && field_tag.number == 26 && id.value.empty()) {
-                    id.value = ParseString(buffer, offset, field_len.length);
-                } else if (field_tag.cls == BerClass::Universal && field_tag.number == 2 && !id.version) {
-                    id.version = ParseInteger(buffer, offset, field_len.length);
-                } else {
-                    offset += field_len.length;
-                }
-            }
-            if (indefinite) {
-                offset += 2;
-            }
+            id = ParsePdbSeqId(buffer, offset, ReadLength(buffer, offset));
+            id.type = TagNameFromNumber(tag.number);
         } else {
             // Textseq-id, Giimport-id, Dbtag, etc.
             id = ParseTextSeqId(buffer, offset, std::nullopt);
