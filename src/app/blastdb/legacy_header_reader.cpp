@@ -961,8 +961,9 @@ void PrintSummary(const PinIndex &index, const std::vector<std::string> &headers
         }
         if (!decode_error.empty()) {
             std::cout << "    Warning: partial decode - " << decode_error << '\n';
-            std::cout << "    Raw: " << TruncateForDisplay(headers[i]) << '\n';
+            //std::cout << "    Raw: " << TruncateForDisplay(headers[i]) << '\n';
         }
+	std::cout << "    Raw: " << TruncateForDisplay(headers[i]) << '\n';
     }
 }
 
