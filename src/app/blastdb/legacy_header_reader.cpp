@@ -892,7 +892,7 @@ void DumpHeaders(const std::vector<std::string> &headers, const std::filesystem:
     }
 }
 
-std::string TruncateForDisplay(const std::string &data, std::size_t max_bytes = 256)
+std::string TruncateForDisplay(const std::string &data, std::size_t max_bytes = 512)
 {
     std::ostringstream os;
     os << std::hex << std::setfill('0');
