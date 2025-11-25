@@ -672,10 +672,9 @@ std::vector<SeqId> ParseSeqIdField(const std::vector<Byte> &buffer, std::size_t 
     auto ids = ParseSeqIdList(buffer, offset);
 
     if (len.indefinite) {
-        while (!IsEoc(buffer, offset)) {
-            SkipElement(buffer, offset);
+        if (IsEoc(buffer, offset)) {
+            offset += 2; // consume the explicit wrapper terminator if present
         }
-        offset += 2;
     } else {
         const std::size_t end = start + len.length;
         if (offset < end) {
@@ -760,8 +759,20 @@ std::vector<BlastDefLine> DecodeDeflineSetBer(const std::string &blob, std::stri
     try {
         while (true) {
             if (outer_indef && IsEoc(buffer, offset)) {
-                offset += 2;
-                break;
+                // Consume any consecutive EOCs that may appear between
+                // deflines when the encoder closes nested indefinite
+                // elements.
+                do {
+                    offset += 2;
+                } while (outer_indef && IsEoc(buffer, offset));
+
+                if (offset >= outer_end || offset >= buffer.size()) {
+                    break;
+                }
+
+                // If more content remains after redundant EOCs, continue
+                // parsing instead of treating the first EOC as the end of
+                // the defline set.
             }
             if (!outer_indef && offset >= outer_end) {
                 break;
