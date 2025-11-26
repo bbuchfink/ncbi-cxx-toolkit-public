@@ -656,11 +656,12 @@ SeqId ParseSeqId(const std::vector<Byte> &buffer, std::size_t &offset)
     id.type = TagNameFromNumber(tag.number);
 
     if (tag.cls != BerClass::ContextSpecific) {
-        // Some legacy databases wrap Seq-id choices inside an extra universal
-        // SEQUENCE/SET layer. Peel that wrapper and parse the enclosed Seq-id
-        // instead of failing outright so we can still recover the identifier.
-        if (tag.cls == BerClass::Universal && tag.constructed &&
-            (tag.number == 16 || tag.number == 17)) {
+        // Some legacy databases wrap Seq-id choices inside non-context
+        // containers (commonly a universal SEQUENCE/SET, but occasionally
+        // other constructed classes). If we encounter a constructed wrapper,
+        // descend into it rather than failing outright so we can still recover
+        // the enclosed Seq-id.
+        if (tag.constructed) {
             const BerLength len = ReadLength(buffer, offset);
             const bool indef = len.indefinite;
             const std::size_t end = indef ? buffer.size() : offset + len.length;
