@@ -682,7 +682,58 @@ SeqId ParseSeqId(const std::vector<Byte> &buffer, std::size_t &offset)
             return id;
         }
 
-        throw PinParseError("Seq-id uses unexpected tag class");
+        // Some legacy records place the Seq-id choice directly under a
+        // primitive, non-context tag. Treat that as an explicit wrapper and
+        // attempt best-effort recovery instead of failing outright so the
+        // caller can still see a usable identifier.
+        const BerLength len = ReadLength(buffer, offset);
+        const std::size_t content_start = offset;
+        std::size_t content_end = len.indefinite ? buffer.size() : offset + len.length;
+
+        if (!len.indefinite && content_end <= buffer.size()) {
+            if (IsVisibleLikeTag(tag)) {
+                id.value = ParseString(buffer, offset, len.length);
+            } else if (len.length > 0 && len.length <= 8) {
+                try {
+                    id.value = std::to_string(ParseInteger(buffer, offset, len.length));
+                } catch (const PinParseError &) {
+                    offset = content_start;
+                    id.value = ParseString(buffer, offset, len.length);
+                }
+            } else {
+                id.value = ParseString(buffer, offset, len.length);
+            }
+        } else {
+            while (offset < buffer.size() && !IsEoc(buffer, offset)) {
+                ++offset;
+            }
+            content_end = std::min(content_end, offset);
+            if (IsEoc(buffer, offset)) {
+                offset += 2;
+            }
+        }
+
+        if (content_end > content_start && id.value.empty()) {
+            std::string best;
+            std::string current;
+            for (std::size_t i = content_start; i < content_end; ++i) {
+                const char ch = static_cast<char>(buffer[i]);
+                if (std::isalnum(static_cast<unsigned char>(ch)) || ch == '_' || ch == '.') {
+                    current.push_back(ch);
+                } else {
+                    if (current.size() > best.size()) {
+                        best.swap(current);
+                    }
+                    current.clear();
+                }
+            }
+            if (current.size() > best.size()) {
+                best.swap(current);
+            }
+            id.value = best;
+        }
+
+        return id;
     }
 
     if (tag.constructed) {
