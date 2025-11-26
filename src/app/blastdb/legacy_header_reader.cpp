@@ -222,6 +222,7 @@ struct SeqId {
     std::string type;
     std::string value;
     std::optional<std::int64_t> version;
+    std::optional<std::string> chain;
 };
 
 struct BlastDefLine {
@@ -535,6 +536,9 @@ SeqId ParsePdbSeqId(const std::vector<Byte> &buffer,
                     const BerLength &len)
 {
     SeqId id;
+    std::optional<std::string> mol;
+    std::optional<std::int64_t> chain_int;
+    std::optional<std::string> chain_str;
     const bool indefinite = len.indefinite;
     const std::size_t end = indefinite ? buffer.size() : offset + len.length;
 
@@ -551,17 +555,63 @@ SeqId ParsePdbSeqId(const std::vector<Byte> &buffer,
         const BerTag field_tag = ReadTag(buffer, offset);
         const BerLength field_len = ReadLength(buffer, offset);
 
-        if (field_tag.cls == BerClass::Universal && field_tag.number == 26 && id.value.empty()) {
-            if (field_tag.constructed || field_len.indefinite) {
-                id.value = ParseExplicitVisible(buffer, offset, field_len);
-            } else {
-                id.value = ParseString(buffer, offset, field_len.length);
+        if (field_tag.cls == BerClass::ContextSpecific) {
+            switch (field_tag.number) {
+            case 0: // mol
+                if (!mol) {
+                    if (field_tag.constructed || field_len.indefinite) {
+                        mol = ParseExplicitVisible(buffer, offset, field_len);
+                    } else {
+                        mol = ParseString(buffer, offset, field_len.length);
+                    }
+                } else if (field_len.indefinite) {
+                    SkipElement(buffer, offset);
+                } else {
+                    offset += field_len.length;
+                }
+                break;
+            case 1: // chain (legacy single character)
+                if (!chain_int) {
+                    if (field_tag.constructed || field_len.indefinite) {
+                        chain_int = ParseExplicitInteger(buffer, offset, field_len);
+                    } else {
+                        chain_int = ParseInteger(buffer, offset, field_len.length);
+                    }
+                } else if (field_len.indefinite) {
+                    SkipElement(buffer, offset);
+                } else {
+                    offset += field_len.length;
+                }
+                break;
+            case 3: // chain-id (multi-character)
+                if (!chain_str) {
+                    if (field_tag.constructed || field_len.indefinite) {
+                        chain_str = ParseExplicitVisible(buffer, offset, field_len);
+                    } else {
+                        chain_str = ParseString(buffer, offset, field_len.length);
+                    }
+                } else if (field_len.indefinite) {
+                    SkipElement(buffer, offset);
+                } else {
+                    offset += field_len.length;
+                }
+                break;
+            default:
+                offset = field_start;
+                SkipElement(buffer, offset);
+                break;
             }
-        } else if (field_tag.cls == BerClass::Universal && field_tag.number == 2 && !id.version) {
+        } else if (field_tag.cls == BerClass::Universal && field_tag.number == 26 && !mol) {
             if (field_tag.constructed || field_len.indefinite) {
-                id.version = ParseExplicitInteger(buffer, offset, field_len);
+                mol = ParseExplicitVisible(buffer, offset, field_len);
             } else {
-                id.version = ParseInteger(buffer, offset, field_len.length);
+                mol = ParseString(buffer, offset, field_len.length);
+            }
+        } else if (field_tag.cls == BerClass::Universal && field_tag.number == 2 && !chain_int) {
+            if (field_tag.constructed || field_len.indefinite) {
+                chain_int = ParseExplicitInteger(buffer, offset, field_len);
+            } else {
+                chain_int = ParseInteger(buffer, offset, field_len.length);
             }
         } else if (field_len.indefinite) {
             SkipElement(buffer, offset);
@@ -579,6 +629,20 @@ SeqId ParsePdbSeqId(const std::vector<Byte> &buffer,
 
     if (!indefinite && offset < end) {
         offset = end;
+    }
+
+    if (mol) {
+        id.value = *mol;
+    }
+
+    if (chain_str && !chain_str->empty()) {
+        id.chain = *chain_str;
+    } else if (chain_int && *chain_int != 32) { // 32 is the deprecated default (space)
+        if (*chain_int >= 0 && *chain_int <= 255) {
+            id.chain = std::string(1, static_cast<char>(*chain_int));
+        } else {
+            id.chain = std::to_string(*chain_int);
+        }
     }
 
     return id;
@@ -926,6 +990,9 @@ std::string FormatSeqId(const SeqId &id)
     os << id.type << ':' << (id.value.empty() ? "<none>" : id.value);
     if (id.version) {
         os << '.' << *id.version;
+    }
+    if (id.chain && !id.chain->empty()) {
+        os << '|' << *id.chain;
     }
     return os.str();
 }
