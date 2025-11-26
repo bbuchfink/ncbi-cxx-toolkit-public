@@ -656,6 +656,31 @@ SeqId ParseSeqId(const std::vector<Byte> &buffer, std::size_t &offset)
     id.type = TagNameFromNumber(tag.number);
 
     if (tag.cls != BerClass::ContextSpecific) {
+        // Some legacy databases wrap Seq-id choices inside an extra universal
+        // SEQUENCE/SET layer. Peel that wrapper and parse the enclosed Seq-id
+        // instead of failing outright so we can still recover the identifier.
+        if (tag.cls == BerClass::Universal && tag.constructed &&
+            (tag.number == 16 || tag.number == 17)) {
+            const BerLength len = ReadLength(buffer, offset);
+            const bool indef = len.indefinite;
+            const std::size_t end = indef ? buffer.size() : offset + len.length;
+
+            id = ParseSeqId(buffer, offset);
+
+            if (indef) {
+                while (offset < end && !IsEoc(buffer, offset)) {
+                    SkipElement(buffer, offset);
+                }
+                if (IsEoc(buffer, offset)) {
+                    offset += 2;
+                }
+            } else if (offset < end) {
+                offset = end;
+            }
+
+            return id;
+        }
+
         throw PinParseError("Seq-id uses unexpected tag class");
     }
 
