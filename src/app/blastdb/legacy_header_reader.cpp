@@ -474,9 +474,11 @@ SeqId ParseTextSeqId(const std::vector<Byte> &buffer, std::size_t &offset, std::
     const bool indefinite = len.indefinite;
     const std::size_t end = indefinite ? (end_limit ? *end_limit : buffer.size()) : offset + len.length;
 
+    bool consumed_eoc = false;
     while (true) {
         if (indefinite && IsEoc(buffer, offset)) {
             offset += 2; // consume Textseq-id EOC
+            consumed_eoc = true;
             break;
         }
         if (!indefinite && offset >= end) {
@@ -524,8 +526,8 @@ SeqId ParseTextSeqId(const std::vector<Byte> &buffer, std::size_t &offset, std::
         }
     }
 
-    if (indefinite) {
-        offset += 2; // consume EOC
+    if (indefinite && !consumed_eoc && IsEoc(buffer, offset)) {
+        offset += 2; // consume trailing EOC if not already handled
     }
 
     return id;
