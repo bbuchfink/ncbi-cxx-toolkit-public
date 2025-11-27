@@ -469,14 +469,17 @@ std::int64_t ParseExplicitInteger(const std::vector<Byte> &buffer, std::size_t &
 
 SeqId ParseTextSeqId(const std::vector<Byte> &buffer, std::size_t &offset, std::optional<std::size_t> end_limit)
 {
+    const std::size_t content_start = offset;
     SeqId id;
     const BerLength len = ReadLength(buffer, offset);
     const bool indefinite = len.indefinite;
     const std::size_t end = indefinite ? (end_limit ? *end_limit : buffer.size()) : offset + len.length;
 
+    bool consumed_eoc = false;
     while (true) {
         if (indefinite && IsEoc(buffer, offset)) {
             offset += 2; // consume Textseq-id EOC
+            consumed_eoc = true;
             break;
         }
         if (!indefinite && offset >= end) {
@@ -524,8 +527,98 @@ SeqId ParseTextSeqId(const std::vector<Byte> &buffer, std::size_t &offset, std::
         }
     }
 
-    if (indefinite) {
-        offset += 2; // consume EOC
+    if (indefinite && !consumed_eoc && IsEoc(buffer, offset)) {
+        offset += 2; // consume trailing EOC if not already handled
+    }
+
+    if (!id.version) {
+        std::size_t probe = content_start;
+        const std::size_t limit = indefinite ? end : std::min(end, buffer.size());
+
+        while (probe < limit) {
+            if (IsEoc(buffer, probe)) {
+                probe += 2;
+                continue;
+            }
+
+            const std::size_t field_start = probe;
+            BerTag tag;
+            BerLength field_len;
+
+            try {
+                tag = ReadTag(buffer, probe);
+                field_len = ReadLength(buffer, probe);
+            } catch (const PinParseError &) {
+                break;
+            }
+
+            if (tag.number == 3) {
+                try {
+                    if (tag.constructed || field_len.indefinite) {
+                        id.version = ParseExplicitInteger(buffer, probe, field_len);
+                    } else {
+                        id.version = ParseInteger(buffer, probe, field_len.length);
+                    }
+                    break;
+                } catch (const PinParseError &) {
+                    probe = field_start;
+
+                    // Best-effort recovery: search inside the wrapper for the
+                    // first INTEGER payload we can decode, even if the wrapper
+                    // shape is unexpected.
+                    std::size_t inner = field_start + (probe - field_start);
+                    const std::size_t inner_limit = field_len.indefinite
+                                                     ? limit
+                                                     : std::min(buffer.size(), probe + field_len.length);
+
+                    while (inner < inner_limit) {
+                        if (IsEoc(buffer, inner)) {
+                            inner += 2;
+                            continue;
+                        }
+
+                        const std::size_t save_inner = inner;
+                        try {
+                            const BerTag inner_tag = ReadTag(buffer, inner);
+                            const BerLength inner_len = ReadLength(buffer, inner);
+                            if (inner_tag.cls == BerClass::Universal && inner_tag.number == 2 && !inner_len.indefinite) {
+                                id.version = ParseInteger(buffer, inner, inner_len.length);
+                                break;
+                            }
+
+                            if (inner_len.indefinite) {
+                                SkipElement(buffer, inner);
+                            } else {
+                                inner += inner_len.length;
+                            }
+
+                            if (inner <= save_inner) {
+                                break;
+                            }
+                        } catch (const PinParseError &) {
+                            break;
+                        }
+                    }
+
+                    if (id.version) {
+                        break;
+                    }
+                }
+            }
+
+            if (field_len.indefinite) {
+                SkipElement(buffer, probe);
+            } else {
+                if (probe + field_len.length > buffer.size()) {
+                    break;
+                }
+                probe += field_len.length;
+            }
+
+            if (probe <= field_start) {
+                break;
+            }
+        }
     }
 
     return id;
@@ -656,7 +749,84 @@ SeqId ParseSeqId(const std::vector<Byte> &buffer, std::size_t &offset)
     id.type = TagNameFromNumber(tag.number);
 
     if (tag.cls != BerClass::ContextSpecific) {
-        throw PinParseError("Seq-id uses unexpected tag class");
+        // Some legacy databases wrap Seq-id choices inside non-context
+        // containers (commonly a universal SEQUENCE/SET, but occasionally
+        // other constructed classes). If we encounter a constructed wrapper,
+        // descend into it rather than failing outright so we can still recover
+        // the enclosed Seq-id.
+        if (tag.constructed) {
+            const BerLength len = ReadLength(buffer, offset);
+            const bool indef = len.indefinite;
+            const std::size_t end = indef ? buffer.size() : offset + len.length;
+
+            id = ParseSeqId(buffer, offset);
+
+            if (indef) {
+                while (offset < end && !IsEoc(buffer, offset)) {
+                    SkipElement(buffer, offset);
+                }
+                if (IsEoc(buffer, offset)) {
+                    offset += 2;
+                }
+            } else if (offset < end) {
+                offset = end;
+            }
+
+            return id;
+        }
+
+        // Some legacy records place the Seq-id choice directly under a
+        // primitive, non-context tag. Treat that as an explicit wrapper and
+        // attempt best-effort recovery instead of failing outright so the
+        // caller can still see a usable identifier.
+        const BerLength len = ReadLength(buffer, offset);
+        const std::size_t content_start = offset;
+        std::size_t content_end = len.indefinite ? buffer.size() : offset + len.length;
+
+        if (!len.indefinite && content_end <= buffer.size()) {
+            if (IsVisibleLikeTag(tag)) {
+                id.value = ParseString(buffer, offset, len.length);
+            } else if (len.length > 0 && len.length <= 8) {
+                try {
+                    id.value = std::to_string(ParseInteger(buffer, offset, len.length));
+                } catch (const PinParseError &) {
+                    offset = content_start;
+                    id.value = ParseString(buffer, offset, len.length);
+                }
+            } else {
+                id.value = ParseString(buffer, offset, len.length);
+            }
+        } else {
+            while (offset < buffer.size() && !IsEoc(buffer, offset)) {
+                ++offset;
+            }
+            content_end = std::min(content_end, offset);
+            if (IsEoc(buffer, offset)) {
+                offset += 2;
+            }
+        }
+
+        if (content_end > content_start && id.value.empty()) {
+            std::string best;
+            std::string current;
+            for (std::size_t i = content_start; i < content_end; ++i) {
+                const char ch = static_cast<char>(buffer[i]);
+                if (std::isalnum(static_cast<unsigned char>(ch)) || ch == '_' || ch == '.') {
+                    current.push_back(ch);
+                } else {
+                    if (current.size() > best.size()) {
+                        best.swap(current);
+                    }
+                    current.clear();
+                }
+            }
+            if (current.size() > best.size()) {
+                best.swap(current);
+            }
+            id.value = best;
+        }
+
+        return id;
     }
 
     if (tag.constructed) {
