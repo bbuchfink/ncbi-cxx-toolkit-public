@@ -552,7 +552,7 @@ SeqId ParseTextSeqId(const std::vector<Byte> &buffer, std::size_t &offset, std::
                 break;
             }
 
-            if (tag.cls == BerClass::ContextSpecific && tag.number == 3) {
+            if (tag.number == 3) {
                 try {
                     if (tag.constructed || field_len.indefinite) {
                         id.version = ParseExplicitInteger(buffer, probe, field_len);
@@ -562,6 +562,47 @@ SeqId ParseTextSeqId(const std::vector<Byte> &buffer, std::size_t &offset, std::
                     break;
                 } catch (const PinParseError &) {
                     probe = field_start;
+
+                    // Best-effort recovery: search inside the wrapper for the
+                    // first INTEGER payload we can decode, even if the wrapper
+                    // shape is unexpected.
+                    std::size_t inner = field_start + (probe - field_start);
+                    const std::size_t inner_limit = field_len.indefinite
+                                                     ? limit
+                                                     : std::min(buffer.size(), probe + field_len.length);
+
+                    while (inner < inner_limit) {
+                        if (IsEoc(buffer, inner)) {
+                            inner += 2;
+                            continue;
+                        }
+
+                        const std::size_t save_inner = inner;
+                        try {
+                            const BerTag inner_tag = ReadTag(buffer, inner);
+                            const BerLength inner_len = ReadLength(buffer, inner);
+                            if (inner_tag.cls == BerClass::Universal && inner_tag.number == 2 && !inner_len.indefinite) {
+                                id.version = ParseInteger(buffer, inner, inner_len.length);
+                                break;
+                            }
+
+                            if (inner_len.indefinite) {
+                                SkipElement(buffer, inner);
+                            } else {
+                                inner += inner_len.length;
+                            }
+
+                            if (inner <= save_inner) {
+                                break;
+                            }
+                        } catch (const PinParseError &) {
+                            break;
+                        }
+                    }
+
+                    if (id.version) {
+                        break;
+                    }
                 }
             }
 
