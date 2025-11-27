@@ -469,6 +469,7 @@ std::int64_t ParseExplicitInteger(const std::vector<Byte> &buffer, std::size_t &
 
 SeqId ParseTextSeqId(const std::vector<Byte> &buffer, std::size_t &offset, std::optional<std::size_t> end_limit)
 {
+    const std::size_t content_start = offset;
     SeqId id;
     const BerLength len = ReadLength(buffer, offset);
     const bool indefinite = len.indefinite;
@@ -528,6 +529,55 @@ SeqId ParseTextSeqId(const std::vector<Byte> &buffer, std::size_t &offset, std::
 
     if (indefinite && !consumed_eoc && IsEoc(buffer, offset)) {
         offset += 2; // consume trailing EOC if not already handled
+    }
+
+    if (!id.version) {
+        std::size_t probe = content_start;
+        const std::size_t limit = indefinite ? end : std::min(end, buffer.size());
+
+        while (probe < limit) {
+            if (IsEoc(buffer, probe)) {
+                probe += 2;
+                continue;
+            }
+
+            const std::size_t field_start = probe;
+            BerTag tag;
+            BerLength field_len;
+
+            try {
+                tag = ReadTag(buffer, probe);
+                field_len = ReadLength(buffer, probe);
+            } catch (const PinParseError &) {
+                break;
+            }
+
+            if (tag.cls == BerClass::ContextSpecific && tag.number == 3) {
+                try {
+                    if (tag.constructed || field_len.indefinite) {
+                        id.version = ParseExplicitInteger(buffer, probe, field_len);
+                    } else {
+                        id.version = ParseInteger(buffer, probe, field_len.length);
+                    }
+                    break;
+                } catch (const PinParseError &) {
+                    probe = field_start;
+                }
+            }
+
+            if (field_len.indefinite) {
+                SkipElement(buffer, probe);
+            } else {
+                if (probe + field_len.length > buffer.size()) {
+                    break;
+                }
+                probe += field_len.length;
+            }
+
+            if (probe <= field_start) {
+                break;
+            }
+        }
     }
 
     return id;
