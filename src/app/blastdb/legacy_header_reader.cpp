@@ -621,6 +621,58 @@ SeqId ParseTextSeqId(const std::vector<Byte> &buffer, std::size_t &offset, std::
         }
     }
 
+    if (!id.version) {
+        // Final, very permissive pass: some legacy records hide the version as
+        // a bare INTEGER that is neither tagged as field 3 nor wrapped in the
+        // expected context-specific class. Scan the Textseq-id payload for a
+        // small INTEGER and treat it as the version if found.
+        std::size_t probe = content_start;
+        const std::size_t limit = indefinite ? end : std::min(end, buffer.size());
+
+        while (probe < limit) {
+            if (IsEoc(buffer, probe)) {
+                probe += 2;
+                continue;
+            }
+
+            const std::size_t field_start = probe;
+            BerTag tag;
+            BerLength field_len;
+
+            try {
+                tag = ReadTag(buffer, probe);
+                field_len = ReadLength(buffer, probe);
+            } catch (const PinParseError &) {
+                break;
+            }
+
+            if (tag.cls == BerClass::Universal && tag.number == 2 && !field_len.indefinite && field_len.length > 0 && field_len.length <= 2) {
+                try {
+                    const std::int64_t value = ParseInteger(buffer, probe, field_len.length);
+                    if (value > 0 && value < 100) {
+                        id.version = value;
+                        break;
+                    }
+                } catch (const PinParseError &) {
+                    probe = field_start; // fall through to skip logic
+                }
+            }
+
+            if (field_len.indefinite) {
+                SkipElement(buffer, probe);
+            } else {
+                if (probe + field_len.length > buffer.size()) {
+                    break;
+                }
+                probe += field_len.length;
+            }
+
+            if (probe <= field_start) {
+                break;
+            }
+        }
+    }
+
     return id;
 }
 
